@@ -66,7 +66,21 @@ pi_web_version=$(jq -r .piWeb.version <<< "$manifest")
 pi_version=$(jq -r .pi.version <<< "$manifest")
 [ "$pi_web_version" = "$(dockerfile_arg PI_WEB_VERSION)" ] || fail "image PI WEB $pi_web_version != Dockerfile pin"
 [ "$(jq -r .piWeb.commit <<< "$manifest")" = "$(dockerfile_arg PI_WEB_COMMIT)" ] || fail "image commit != Dockerfile pin"
-pass "manifest matches the Dockerfile pins (PI WEB $pi_web_version, Pi $pi_version)"
+# The baked Pi packages must be the ones the build asked for. Set
+# CONTRACT_PI_PACKAGES to the build's PI_PACKAGES value when testing a build that
+# overrides it (empty for none).
+expected_packages=${CONTRACT_PI_PACKAGES-$(dockerfile_arg PI_PACKAGES)}
+jq -e --arg expected "$expected_packages" \
+  '.piPackages.sources == ($expected | split(" ") | map(select(length > 0)))' <<< "$manifest" > /dev/null \
+  || fail "image Pi packages $(jq -c .piPackages.sources <<< "$manifest") != expected \"$expected_packages\""
+# Policy checks follow from what the image must contain, never from what it
+# happens to contain, so a missing policy extension fails instead of skipping.
+if jq -e '.piPackages.sources | any(startswith("npm:@gotgenes/pi-permission-system@"))' <<< "$manifest" > /dev/null; then
+  policy=1
+else
+  policy=0
+fi
+pass "manifest matches the Dockerfile pins (PI WEB $pi_web_version, Pi $pi_version, $(jq '.piPackages.sources | length' <<< "$manifest") Pi packages)"
 
 docker run --rm --entrypoint bash "$image" -euo pipefail -c '
   for binary in pi pi-web pi-web-server pi-web-sessiond pi-web-container pi-login \
@@ -97,13 +111,16 @@ sh_in "$home" '
   test ! -e "$agent/models.json"
   test ! -e "$agent/mcp.json"
   jq -e --slurpfile image /opt/pi-web/pi-packages/image-packages.json ".packages == \$image[0]" "$agent/settings.json" > /dev/null
-  if [ -d /opt/pi-web/pi-packages/node_modules/@gotgenes/pi-permission-system ]; then
+  if [ "$POLICY" = 1 ]; then
+    test -f /opt/pi-web/pi-packages/node_modules/@gotgenes/pi-permission-system/package.json
     test "$(readlink "$agent/extensions/pi-permission-system/config.json")" = /opt/pi-web/defaults/permissions.json
     jq -e ".permission.path[\"**/.pi/agent/auth.json\"] == \"deny\"" /opt/pi-web/defaults/permissions.json > /dev/null
+  else
+    test ! -e "$agent/extensions/pi-permission-system/config.json"
   fi
   test -d "$HOME/projects"
   test "$(stat -c %a "$agent")" = 700
-'
+' -e "POLICY=$policy"
 docker run --rm -i -v "$home:/home/node" -e PI_OFFLINE=1 --entrypoint node "$image" \
   --input-type=module - < "$here/in-image.mjs"
 pass "prepare registers image packages and the default policy; Pi loads them"
@@ -177,7 +194,7 @@ sh_in "$home" '
   agent=$HOME/.pi/agent
   test "$(readlink "$agent/models.json")" = "$HOME/config/models.json"
   test "$(readlink "$agent/mcp.json")" = "$HOME/config/mcp.json"
-  if [ -d /opt/pi-web/pi-packages/node_modules/@gotgenes/pi-permission-system ]; then
+  if [ "$POLICY" = 1 ]; then
     test "$(readlink "$agent/extensions/pi-permission-system/config.json")" = "$HOME/config/permissions.json"
     PI_WEB_PERMISSIONS_FILE= pi-web-container prepare
     test ! -e "$agent/extensions/pi-permission-system/config.json"
@@ -186,7 +203,7 @@ sh_in "$home" '
        PI_WEB_LLM_MODELS=m pi-web-container prepare 2> /dev/null; then
     echo "conflicting model settings were accepted" >&2; exit 1
   fi
-'
+' -e "POLICY=$policy"
 pass "mounted files are linked; conflicting settings are rejected"
 
 # --- Split services: sessiond and server share one home volume ----------------

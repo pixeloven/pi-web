@@ -164,6 +164,8 @@ docker build -t pi-web:local docker/image
 docker/image/test/image-contract.sh pi-web:local
 ```
 
+The contract test expects the Dockerfile's default `PI_PACKAGES`. For a build that overrides it, pass the same value as `CONTRACT_PI_PACKAGES`, for example `CONTRACT_PI_PACKAGES= docker/image/test/image-contract.sh pi-web:local` for an image with no Pi packages.
+
 The build needs network access to GitHub and npm. Build arguments:
 
 | Argument | Default | Meaning |
