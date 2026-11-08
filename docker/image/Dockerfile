@@ -147,8 +147,11 @@ COPY rootfs/ /
 RUN chmod 0755 /usr/local/bin/pi-web-container /usr/local/bin/pi-login \
   && chmod 0444 /opt/pi-web/defaults/*
 
+# NPM_CONFIG_PREFIX makes `npm root -g` the PI WEB install, so PI WEB detects
+# a packaged npm-global install instead of a source checkout (dev branding).
 ENV HOME=/home/node \
     PATH=/opt/pi-web/global/bin:${PATH} \
+    NPM_CONFIG_PREFIX=/opt/pi-web/global \
     PI_WEB_HOST=0.0.0.0 \
     PI_WEB_PORT=8504 \
     PI_WEB_DEFAULTS_CONFIG=/opt/pi-web/defaults/config.json \

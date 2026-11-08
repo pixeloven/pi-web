@@ -155,7 +155,7 @@ Back up the volume as you would credentials: it contains `auth.json` and any tok
 - Pi packages, installed under `/opt/pi-web/pi-packages` and registered in `~/.pi/agent/settings.json` at start-up so a volume never hides them. Packages you add with `pi install` stay in the volume and are kept. Default set: `@gotgenes/pi-permission-system`, `pi-subagents`, `pi-web-access`.
 - Tools for agent sessions: `git`, `gh`, `ssh`, `rg`, `jq`, `curl`, `python3` with `venv` and `pip`, `uv`, `ast-grep`.
 
-The image updates by replacing it. PI WEB's in-app update does not apply; pull a newer tag instead.
+The image updates by replacing it: pull a newer tag. PI WEB still lists its npm update command; in the container it refuses to run (no native services, root-owned install) and changes nothing.
 
 ## Building
 

@@ -216,6 +216,15 @@ jq -e --arg pi "$pi_version" '.components.sessiond.available == true and .compon
   || fail "server does not see a running sessiond: $runtime"
 pass "split sessiond + server start and connect over the shared socket"
 
+status=$(docker exec "$server" curl -fsS http://127.0.0.1:8504/api/pi-web/status)
+jq -e '.components.web.installation.kind == "npm-global" and .components.sessiond.installation.kind == "npm-global"' \
+  <<< "$status" > /dev/null \
+  || fail "PI WEB does not detect a packaged npm-global install: $status"
+webmanifest=$(docker exec "$server" curl -fsS http://127.0.0.1:8504/manifest.webmanifest)
+jq -e '.name | endswith("(dev)") | not' <<< "$webmanifest" > /dev/null \
+  || fail "PI WEB presents the image as a dev deployment: $webmanifest"
+pass "PI WEB detects the image as a packaged install, not a dev checkout"
+
 # --- All-in-one container ------------------------------------------------------
 new_volume all
 all="pi-web-contract-all-$suffix"
