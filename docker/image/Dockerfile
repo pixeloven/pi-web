@@ -28,12 +28,6 @@ ARG AST_GREP_VERSION=0.51.1
 # Set to an empty string for an image with no extra Pi packages.
 ARG PI_PACKAGES="npm:@gotgenes/pi-permission-system@42.0.0 npm:pi-subagents@0.87.0 npm:pi-web-access@0.47.0"
 
-# Opt-in: replace fs.copyFile with a stream copy in the session archive store.
-# Needed only when the Pi agent directory sits on storage that rejects
-# copy_file_range(2) with EPERM, such as virtiofs over NFS. Local disks do not
-# need it. Leave "false" unless archiving sessions fails with EPERM.
-ARG PI_WEB_STREAM_COPY_PATCH=false
-
 FROM ${UV_IMAGE} AS uv
 
 # --- Build: upstream source -> global install under /opt/pi-web/global -------
@@ -41,7 +35,6 @@ FROM ${NODE_IMAGE} AS build
 ARG PI_WEB_VERSION
 ARG PI_WEB_COMMIT
 ARG PI_WEB_REPO
-ARG PI_WEB_STREAM_COPY_PATCH
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # node-pty and tree-sitter build from source; the toolchain stays in this stage.
@@ -61,15 +54,6 @@ RUN git init --quiet . \
        echo "v${PI_WEB_VERSION} resolved to ${actual}, expected ${PI_WEB_COMMIT}" >&2; exit 1; \
      fi \
   && test "$(jq -r .version package.json)" = "${PI_WEB_VERSION}"
-
-RUN case "${PI_WEB_STREAM_COPY_PATCH}" in \
-      true) \
-        node --test /opt/pi-web-build/patch-session-archive.test.mjs \
-        && node /opt/pi-web-build/patch-session-archive.mjs src/server/sessions/sessionArchiveStore.ts \
-        && git diff --check ;; \
-      false) ;; \
-      *) echo "PI_WEB_STREAM_COPY_PATCH must be true or false" >&2; exit 1 ;; \
-    esac
 
 # `npm pack` drops package-lock.json, so pin the packed manifest to the lockfile
 # before installing it; otherwise direct dependencies and peers float at build
@@ -112,19 +96,20 @@ RUN set -e; \
   jq -n \
     --arg version "${PI_WEB_VERSION}" \
     --arg commit "$(git -C /src rev-parse HEAD)" \
-    --arg streamCopyPatch "${PI_WEB_STREAM_COPY_PATCH}" \
     --slurpfile pinned /tmp/pinned.json \
     --slurpfile packages /opt/pi-web/pi-packages/image-packages.json \
     --arg sources "${PI_PACKAGES}" \
-    '{piWeb: {version: $version, commit: $commit, streamCopyPatch: ($streamCopyPatch == "true")}, pi: {version: $pinned[0].peerDependencies["@earendil-works/pi-coding-agent"]}, piPackages: {sources: ($sources | split(" ") | map(select(length > 0))), paths: $packages[0]}}' \
+    '{piWeb: {version: $version, commit: $commit}, pi: {version: $pinned[0].peerDependencies["@earendil-works/pi-coding-agent"]}, piPackages: {sources: ($sources | split(" ") | map(select(length > 0))), paths: $packages[0]}}' \
     > /opt/pi-web/image.json
 
 # Build gate: the baked permission policy must validate against the schema
 # shipped by the pinned extension. An invalid policy is ignored by the
 # extension, which would silently drop every deny rule.
 COPY rootfs/opt/pi-web/defaults/permissions.json /tmp/permissions.json
-RUN schema=/opt/pi-web/pi-packages/node_modules/@gotgenes/pi-permission-system/schemas/permissions.schema.json; \
-  if [ -f "${schema}" ]; then \
+RUN package=/opt/pi-web/pi-packages/node_modules/@gotgenes/pi-permission-system; \
+  schema="${package}/schemas/permissions.schema.json"; \
+  if [ -d "${package}" ]; then \
+    test -f "${schema}" || { echo "missing permission schema: ${schema}" >&2; exit 1; }; \
     npx --yes ajv-cli@5.0.0 validate --spec=draft2020 --strict=false -s "${schema}" -d /tmp/permissions.json; \
   fi
 

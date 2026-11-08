@@ -28,23 +28,6 @@ env:
   CONTEXT: docker/image
 
 jobs:
-  stream-copy-patch:
-    name: Opt-in stream-copy patch applies to the pinned release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Unit tests
-        run: node --test docker/image/build/patch-session-archive.test.mjs
-
-      - name: Transform the pinned upstream source
-        run: |
-          version=$(sed -n 's/^ARG PI_WEB_VERSION=//p' "$CONTEXT/Dockerfile")
-          curl -fsSL "https://raw.githubusercontent.com/jmfederico/pi-web/v${version}/src/server/sessions/sessionArchiveStore.ts" \
-            -o "$RUNNER_TEMP/sessionArchiveStore.ts"
-          node docker/image/build/patch-session-archive.mjs "$RUNNER_TEMP/sessionArchiveStore.ts"
-
   examples:
     name: Compose and Kubernetes examples are valid
     runs-on: ubuntu-latest
@@ -91,7 +74,7 @@ jobs:
 
   publish:
     name: Publish to GHCR
-    needs: [stream-copy-patch, examples, test]
+    needs: [examples, test]
     if: github.event_name == 'push' && github.repository == 'pixeloven/pi-web'
     runs-on: ubuntu-latest
     permissions:

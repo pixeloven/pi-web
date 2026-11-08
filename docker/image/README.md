@@ -25,11 +25,12 @@ Open <http://127.0.0.1:8504>. The default command, `all`, runs the session daemo
 
 ```bash
 cd docker/image/examples/compose
-cp pi-web.env.example pi-web.env   # optional
+cp settings.env.example settings.env   # optional
+cp pi-web.env.example pi-web.env       # optional
 docker compose up -d
 ```
 
-Settings and secrets go in `pi-web.env`, which only the `sessiond` service reads.
+Non-secret settings, including the [PI WEB settings](#pi-web-settings) the web server reads, go in `settings.env`, which both services read. Secrets go in `pi-web.env`, which only the `sessiond` service reads.
 
 ## Kubernetes
 
@@ -124,7 +125,7 @@ The image reads secrets only from the environment. None are required.
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, … | Pi's [built-in providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md). |
 | `GH_TOKEN` | `gh`, and `git` over HTTPS to github.com through the `gh` credential helper. |
 
-Give secrets to the session daemon only; the web server does not need them.
+Give secrets to the session daemon only; the web server does not need them. In the Compose example they go in `pi-web.env`; on Kubernetes, in the `pi-web-secrets` Secret.
 
 ### Provider sign-in
 
@@ -171,16 +172,11 @@ The build needs network access to GitHub and npm. Build arguments:
 | `PI_WEB_COMMIT` | that tag's commit | The build fails if the tag resolves elsewhere. Empty skips the check. |
 | `PI_WEB_REPO` | upstream repository | Git URL to build from. |
 | `PI_PACKAGES` | three packages above | Space-separated exact `npm:<name>@<version>` Pi packages. Empty for none. |
-| `PI_WEB_STREAM_COPY_PATCH` | `false` | See below. |
 | `NODE_IMAGE`, `UV_IMAGE`, `AST_GREP_VERSION` | see `Dockerfile` | Base image and tool pins. |
 
 To upgrade PI WEB, change `PI_WEB_VERSION` and `PI_WEB_COMMIT` together, rebuild, and run the contract test. Pi core follows the new release's lockfile.
 
-### Stream-copy patch
-
-`PI_WEB_STREAM_COPY_PATCH=true` changes how PI WEB copies session files when archiving them. Upstream uses `fs.copyFile`, which Node runs as `copy_file_range(2)` on Linux. Some network or virtualized filesystems, such as virtiofs backed by NFS, reject that call with `EPERM`, and archiving fails. The patch copies through streams instead. Local disks do not need it, so it is off by default. Enable it only when archiving fails with `EPERM`.
-
-The patch is a checked source transform, [`build/patch-session-archive.mjs`](build/patch-session-archive.mjs). The build fails if upstream changes the code it replaces.
+A stream-copy patch for session archiving on NFS or virtiofs storage, which reject `copy_file_range(2)`, remains on this repository's `harmony/*` branches. This image does not include it.
 
 ## Tags
 
