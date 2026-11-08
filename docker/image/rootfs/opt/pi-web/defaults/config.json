@@ -1,0 +1,5 @@
+{
+  "pathAccess": {
+    "allowedPaths": ["/home/node/projects"]
+  }
+}
