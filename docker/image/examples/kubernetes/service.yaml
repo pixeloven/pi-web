@@ -1,0 +1,15 @@
+# ClusterIP only. PI WEB has no login: expose it through an authenticating
+# ingress or proxy, never directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pi-web
+  labels:
+    app.kubernetes.io/name: pi-web
+spec:
+  selector:
+    app.kubernetes.io/name: pi-web
+  ports:
+    - name: http
+      port: 8504
+      targetPort: http

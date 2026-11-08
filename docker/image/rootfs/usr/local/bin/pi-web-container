@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# Entrypoint for the portable PI WEB image.
+#
+#   pi-web-container all             prepare, then run sessiond and the web server (default)
+#   pi-web-container sessiond        prepare, then run the session daemon
+#   pi-web-container server          run the web/API server
+#   pi-web-container prepare         apply environment configuration and exit
+#   pi-web-container health ROLE     probe "server" or "sessiond"; exit 0 when healthy
+#   pi-web-container <command...>    run any other command unchanged
+#
+# Preparation turns environment variables into Pi configuration under the Pi
+# agent directory. It never writes secret values: generated files reference
+# environment variables that Pi resolves at run time. See README.md.
+set -euo pipefail
+
+readonly IMAGE_PACKAGES=/opt/pi-web/pi-packages/image-packages.json
+readonly IMAGE_PACKAGE_PREFIX=/opt/pi-web/pi-packages/
+readonly DEFAULT_PERMISSIONS=/opt/pi-web/defaults/permissions.json
+
+log() { printf 'pi-web-container: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+agent_dir() { printf '%s' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"; }
+data_dir() { printf '%s' "${PI_WEB_DATA_DIR:-$HOME/.pi-web}"; }
+
+# Each file this script manages has a sidecar stamp: "sha256:<hash>" for a
+# generated file, or "link" for a symlink to a mounted file. A target that does
+# not match its stamp was changed by someone else and is never deleted; it is
+# kept as a timestamped backup before being replaced.
+stamp_of() { printf '%s.pi-web-container' "$1"; }
+
+file_hash() { sha256sum < "$1" | cut -d' ' -f1; }
+
+is_managed() {
+  local target=$1 stamp
+  stamp=$(stamp_of "$target")
+  [ -f "$stamp" ] || return 1
+  case "$(cat "$stamp")" in
+    link) [ -L "$target" ] ;;
+    sha256:*) [ -f "$target" ] && [ ! -L "$target" ] && [ "sha256:$(file_hash "$target")" = "$(cat "$stamp")" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+backup_foreign() {
+  local target=$1 backup
+  { [ -e "$target" ] || [ -L "$target" ]; } || return 0
+  is_managed "$target" && return 0
+  [ -L "$target" ] && { rm -f "$target"; return 0; }
+  backup="$target.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$target" "$backup"
+  log "kept existing $(basename "$target") as $backup"
+}
+
+# install_generated TARGET TMPFILE: atomically replace TARGET with TMPFILE.
+install_generated() {
+  local target=$1 tmp=$2
+  backup_foreign "$target"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$target"
+  printf 'sha256:%s\n' "$(file_hash "$target")" > "$(stamp_of "$target")"
+}
+
+# install_link TARGET SOURCE: make TARGET a symlink to a mounted, read-only file.
+install_link() {
+  local target=$1 source=$2
+  [ -r "$source" ] || die "$source is not a readable file"
+  jq -e . "$source" > /dev/null || die "$source is not valid JSON"
+  backup_foreign "$target"
+  rm -f "$target"
+  ln -s "$source" "$target"
+  printf 'link\n' > "$(stamp_of "$target")"
+}
+
+# release TARGET: the setting was removed; delete what this script installed.
+release() {
+  local target=$1
+  [ -f "$(stamp_of "$target")" ] || return 0
+  if is_managed "$target"; then
+    rm -f "$target"
+  else
+    log "left $(basename "$target") in place: it changed since pi-web-container wrote it"
+  fi
+  rm -f "$(stamp_of "$target")"
+}
+
+# Register the image's Pi packages in settings.json as local paths. Entries the
+# user added are kept; stale entries for image paths no longer in the image are
+# dropped, so an image upgrade replaces its own packages.
+register_image_packages() {
+  local settings
+  settings="$(agent_dir)/settings.json"
+  [ -f "$IMAGE_PACKAGES" ] || return 0
+  local current='{}'
+  if [ -s "$settings" ]; then
+    jq -e 'type == "object"' "$settings" > /dev/null 2>&1 || die "$settings is not a JSON object"
+    current=$(cat "$settings")
+  fi
+  local tmp="$settings.tmp.$$"
+  printf '%s' "$current" | jq --slurpfile image "$IMAGE_PACKAGES" --arg prefix "$IMAGE_PACKAGE_PREFIX" '
+    def src: if type == "string" then . else (.source // "") end;
+    (.packages // []) as $existing
+    | .packages = (
+        [ $image[0][] as $path
+          | (first($existing[] | select(src == $path)) // $path) ]
+        + [ $existing[] | select(src | startswith($prefix) | not) ]
+      )
+  ' > "$tmp"
+  mv -f "$tmp" "$settings"
+}
+
+# models.json: either a mounted file, or one OpenAI-compatible provider built
+# from environment variables. Without either, an existing models.json is left
+# alone and Pi's built-in providers apply.
+configure_models() {
+  local target
+  target="$(agent_dir)/models.json"
+  if [ -n "${PI_WEB_MODELS_FILE:-}" ] && [ -n "${PI_WEB_LLM_BASE_URL:-}" ]; then
+    die "set PI_WEB_MODELS_FILE or PI_WEB_LLM_BASE_URL, not both"
+  fi
+  if [ -n "${PI_WEB_MODELS_FILE:-}" ]; then
+    install_link "$target" "$PI_WEB_MODELS_FILE"
+    return
+  fi
+  [ -n "${PI_WEB_LLM_BASE_URL:-}" ] || { release "$target"; return 0; }
+  [ -n "${PI_WEB_LLM_MODELS:-}" ] || die "PI_WEB_LLM_MODELS is required with PI_WEB_LLM_BASE_URL"
+  local provider=${PI_WEB_LLM_PROVIDER:-gateway}
+  [[ "$provider" =~ ^[A-Za-z0-9_-]+$ ]] || die "PI_WEB_LLM_PROVIDER may contain only letters, digits, _ and -"
+  local tmp="$target.tmp.$$"
+  jq -n \
+    --arg provider "$provider" \
+    --arg name "${PI_WEB_LLM_PROVIDER_NAME:-}" \
+    --arg baseUrl "$PI_WEB_LLM_BASE_URL" \
+    --arg api "${PI_WEB_LLM_API:-openai-completions}" \
+    --arg models "$PI_WEB_LLM_MODELS" \
+    --argjson hasKey "$([ -n "${PI_WEB_LLM_API_KEY:-}" ] && echo true || echo false)" '
+      ($models | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $ids
+      | if ($ids | length) == 0 then error("PI_WEB_LLM_MODELS lists no model IDs") else . end
+      | {providers: {($provider): (
+          {baseUrl: $baseUrl, api: $api}
+          + (if $name != "" then {name: $name} else {} end)
+          + (if $hasKey then {apiKey: "$PI_WEB_LLM_API_KEY"} else {} end)
+          + {models: ($ids | map({id: .}))}
+        )}}
+    ' > "$tmp"
+  install_generated "$target" "$tmp"
+}
+
+# mcp.json: either a mounted file, or one streamable-HTTP server from
+# environment variables. Pi expands ${VAR} in headers at connection time.
+configure_mcp() {
+  local target
+  target="$(agent_dir)/mcp.json"
+  if [ -n "${PI_WEB_MCP_FILE:-}" ] && [ -n "${PI_WEB_MCP_URL:-}" ]; then
+    die "set PI_WEB_MCP_FILE or PI_WEB_MCP_URL, not both"
+  fi
+  if [ -n "${PI_WEB_MCP_FILE:-}" ]; then
+    install_link "$target" "$PI_WEB_MCP_FILE"
+    return
+  fi
+  [ -n "${PI_WEB_MCP_URL:-}" ] || { release "$target"; return 0; }
+  local name=${PI_WEB_MCP_NAME:-gateway}
+  [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || die "PI_WEB_MCP_NAME may contain only letters, digits, _ and -"
+  local tmp="$target.tmp.$$"
+  jq -n \
+    --arg name "$name" \
+    --arg url "$PI_WEB_MCP_URL" \
+    --argjson hasKey "$([ -n "${PI_WEB_MCP_API_KEY:-}" ] && echo true || echo false)" '
+      {mcpServers: {($name): (
+        {url: $url}
+        + (if $hasKey then {headers: {Authorization: "Bearer ${PI_WEB_MCP_API_KEY}"}} else {} end)
+      )}}
+    ' > "$tmp"
+  install_generated "$target" "$tmp"
+}
+
+# Link the permission policy when the image ships pi-permission-system. The
+# policy file stays read-only and owned by root; an empty PI_WEB_PERMISSIONS_FILE
+# leaves the agent directory's own policy untouched.
+configure_permissions() {
+  [ -d "${IMAGE_PACKAGE_PREFIX}node_modules/@gotgenes/pi-permission-system" ] || return 0
+  local source=${PI_WEB_PERMISSIONS_FILE-$DEFAULT_PERMISSIONS}
+  local dir
+  dir="$(agent_dir)/extensions/pi-permission-system"
+  if [ -z "$source" ]; then
+    release "$dir/config.json"
+    return 0
+  fi
+  mkdir -p "$dir"
+  install_link "$dir/config.json" "$source"
+}
+
+prepare() {
+  umask 0077
+  mkdir -p "$(agent_dir)" "$(data_dir)" "$HOME/projects"
+  # The agent directory holds credentials (auth.json).
+  chmod 0700 "$(agent_dir)" 2> /dev/null || log "could not make $(agent_dir) private"
+  register_image_packages
+  configure_models
+  configure_mcp
+  configure_permissions
+  umask 0022
+}
+
+sessiond_url() {
+  if [ -n "${PI_WEB_SESSIOND_PORT:-}" ]; then
+    printf 'http://%s:%s' "${PI_WEB_SESSIOND_HOST:-127.0.0.1}" "$PI_WEB_SESSIOND_PORT"
+  fi
+}
+
+health() {
+  case "${1:-}" in
+    server)
+      curl -fsS --max-time 5 "http://127.0.0.1:${PI_WEB_PORT:-8504}/api/pi-web/health" > /dev/null
+      ;;
+    sessiond)
+      local url
+      url=$(sessiond_url)
+      if [ -n "$url" ]; then
+        curl -fsS --max-time 5 "$url/health" > /dev/null
+      else
+        curl -fsS --max-time 5 --unix-socket "${PI_WEB_SESSIOND_SOCKET:-$(data_dir)/sessiond.sock}" \
+          http://localhost/health > /dev/null
+      fi
+      ;;
+    *) die "usage: pi-web-container health server|sessiond" ;;
+  esac
+}
+
+# Run sessiond and the web server in one container. If either exits, stop the
+# other and exit with the first exit status; forward TERM/INT to both.
+run_all() {
+  local sessiond_pid server_pid status _
+  pi-web-sessiond &
+  sessiond_pid=$!
+  for _ in $(seq 1 60); do
+    health sessiond 2> /dev/null && break
+    kill -0 "$sessiond_pid" 2> /dev/null || break
+    sleep 0.5
+  done
+  pi-web-server &
+  server_pid=$!
+  trap 'kill -TERM "$sessiond_pid" "$server_pid" 2> /dev/null || true' TERM INT
+  set +e
+  wait -n "$sessiond_pid" "$server_pid"
+  status=$?
+  kill -TERM "$sessiond_pid" "$server_pid" 2> /dev/null
+  wait "$sessiond_pid" "$server_pid"
+  exit "$status"
+}
+
+case "${1:-all}" in
+  all)
+    prepare
+    run_all
+    ;;
+  sessiond)
+    prepare
+    exec pi-web-sessiond
+    ;;
+  server)
+    exec pi-web-server
+    ;;
+  prepare)
+    prepare
+    ;;
+  health)
+    shift
+    health "$@"
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac

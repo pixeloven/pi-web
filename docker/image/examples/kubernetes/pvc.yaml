@@ -1,0 +1,14 @@
+# Holds the whole home directory: Pi sessions and credentials, PI WEB state
+# and config, and checkouts under ~/projects. Size it for your repositories.
+# No storageClassName: the cluster default applies.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pi-web-home
+  labels:
+    app.kubernetes.io/name: pi-web
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Start Pi's terminal UI for /login (subscription or OAuth providers) without
+# loading extensions, skills, or project context files. Run it in the sessiond
+# container, then restart sessiond so running sessions pick up the credential.
+# The credential is written to the Pi agent directory, never to the image.
+set -eu
+umask 0077
+cd /tmp
+exec pi --no-extensions --no-skills --no-context-files "$@"

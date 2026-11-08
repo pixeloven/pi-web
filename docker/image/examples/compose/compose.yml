@@ -1,0 +1,64 @@
+# PI WEB with Docker Compose: the session daemon and the web server run as
+# separate services, so restarting or upgrading the web service does not stop
+# active Pi sessions. Both share one home volume, which holds all state and the
+# session daemon's socket.
+#
+#   cp settings.env.example settings.env   # optional: settings for both services
+#   cp pi-web.env.example pi-web.env       # optional: secrets for sessiond only
+#   docker compose up -d
+#   open http://127.0.0.1:8504
+#
+# See ../../README.md for every setting.
+name: pi-web
+
+x-pi-web: &pi-web
+  image: ${PI_WEB_IMAGE:-ghcr.io/pixeloven/pi-web:latest}
+  restart: unless-stopped
+  # Non-secret settings: PI WEB settings for the web server, and model gateway
+  # and MCP settings for the session daemon.
+  env_file:
+    - path: ./settings.env
+      required: false
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    - home:/home/node
+    # Optional: work on host checkouts instead of the volume. The host
+    # directory must be writable by UID 1000.
+    # - ./projects:/home/node/projects
+
+services:
+  sessiond:
+    <<: *pi-web
+    command: ["sessiond"]
+    # Secrets: model gateway and MCP keys, provider keys, GH_TOKEN. Only the
+    # session daemon needs them.
+    env_file:
+      - path: ./settings.env
+        required: false
+      - path: ./pi-web.env
+        required: false
+    healthcheck:
+      test: ["CMD", "pi-web-container", "health", "sessiond"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+
+  web:
+    <<: *pi-web
+    command: ["server"]
+    depends_on:
+      sessiond:
+        condition: service_healthy
+    # Localhost only. PI WEB has no login: put an authenticating reverse
+    # proxy, VPN, or SSH tunnel in front of it for remote access.
+    ports:
+      - "127.0.0.1:${PI_WEB_PORT:-8504}:8504"
+    healthcheck:
+      test: ["CMD", "pi-web-container", "health", "server"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+
+volumes:
+  home:
